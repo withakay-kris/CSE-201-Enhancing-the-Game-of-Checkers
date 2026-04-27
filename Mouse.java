@@ -7,7 +7,7 @@ import javax.swing.BorderFactory;
 import javax.swing.border.Border;
 
 public class Mouse implements MouseListener {
-	final int Range = 75;
+	final int Range = 75; // Original was 75
 	private int selectedRow;
 	private int selectedCol;
 	private Tiles tile;
@@ -28,7 +28,7 @@ public class Mouse implements MouseListener {
 
 			if (piece.getSide() == board.turn()) { //If the turn corresponds with Red/Black player's turn
 				System.out.println("---------------------");	//Output for organized debugging
-				board.clearPotentialMoves();
+				
 				this.selectedRow = this.piece.getRow(); // Get selected piece coordinates
 				this.selectedCol = this.piece.getCol();
 				tile.selected(true);					//Passed as selected!	
