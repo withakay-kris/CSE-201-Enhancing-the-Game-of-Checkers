@@ -1,4 +1,3 @@
-package Checkers;
 
 public class Player {
 	private int pieces = 0;
