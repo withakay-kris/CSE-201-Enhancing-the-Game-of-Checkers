@@ -2,11 +2,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * BoardModel — the single source of game-logic truth (MVC: Model).
- *
- * All views (Board.java GUI, CheckersText) delegate validation / move
- * execution / win checking here so the rules stay consistent.
- *
  * Grade-C rules : turn switching, no kings (stacks instead), optional
  *                 captures (mandatory only when no other move exists),
  *                 stack-penalty mechanic on promotion.
@@ -33,7 +28,7 @@ import java.util.List;
  */
 public class BoardModel {
 
-    /* ---------------- State ---------------- */
+    /* State */
 
     private final CellCoordinate[][] board;
     private final int size;
@@ -47,7 +42,7 @@ public class BoardModel {
     private int pendingJumpRow = -1;
     private int pendingJumpCol = -1;
 
-    /* ---------------- Construction ---------------- */
+    /* Construction */
 
     public BoardModel(int size, int level) {
         this.size  = size;
@@ -72,7 +67,7 @@ public class BoardModel {
         }
     }
 
-    /* ---------------- Move interface used by views ---------------- */
+    /* Move interface used by views */
 
     /**
      * Full validation for a player-attempted move.
@@ -173,7 +168,7 @@ public class BoardModel {
         return true;
     }
 
-    /* ---------------- Win condition ---------------- */
+    /* Win condition */
 
     /**
      * @return 1 if Red wins, 2 if Black wins, 0 if the game continues, 3 if drawn
@@ -203,7 +198,7 @@ public class BoardModel {
         return 0;
     }
 
-    /* ---------------- AI: minimax with alpha–beta pruning ---------------- */
+    /* AI: minimax with alpha–beta pruning */
 
     /**
      * Returns the best [r1,c1,r2,c2] move for the current player.
@@ -314,7 +309,7 @@ public class BoardModel {
         return score;
     }
 
-    /* ---------------- Move enumeration ---------------- */
+    /* Move enumeration */
 
     /** All legal [r1,c1,r2,c2] capture moves available to {@code player}. */
     public List<int[]> getAllCaptures(int player) {
@@ -368,7 +363,7 @@ public class BoardModel {
         return false;
     }
 
-    /* ---------------- Stack penalty (Grade C) ---------------- */
+    /* Stack penalty (Grade C) */
 
     public boolean isPendingPenalty() { return pendingPenalty; }
 
@@ -402,7 +397,7 @@ public class BoardModel {
         return true;
     }
 
-    /* ---------------- Getters ---------------- */
+    /* Getters */
 
     public int getSize()                  { return size; }
     public int getLevel()                 { return level; }
@@ -423,7 +418,7 @@ public class BoardModel {
         return n;
     }
 
-    /* ---------------- Internal helpers ---------------- */
+    /* Internal helpers */
 
     private boolean isOwnedBy(int r, int c, int player) {
         return isOwnPiece(board[r][c].getStatus(), player);
@@ -498,12 +493,17 @@ public class BoardModel {
         int   absCol  = Math.abs(colDiff);
 
         if (level == 3 && isKing) {
-            // Flying-king capture: any diagonal distance with exactly 1 opponent in path.
-            if (absRow != absCol || absRow < 2) return false;
-            int dr = rowDiff / absRow;
-            int dc = colDiff / absCol;
+            // Grade-A flying-king capture: any direction (H, V, or D), any
+            // distance, with exactly one opponent piece in the path.
+            boolean diagonal   = (absRow == absCol && absRow >= 2);
+            boolean horizontal = (absRow == 0 && absCol >= 2);
+            boolean vertical   = (absCol == 0 && absRow >= 2);
+            if (!diagonal && !horizontal && !vertical) return false;
+            int steps = Math.max(absRow, absCol);
+            int dr = (rowDiff == 0) ? 0 : rowDiff / absRow;
+            int dc = (colDiff == 0) ? 0 : colDiff / absCol;
             int opps = 0;
-            for (int i = 1; i < absRow; i++) {
+            for (int i = 1; i < steps; i++) {
                 int s = board[r1 + i * dr][c1 + i * dc].getStatus();
                 if (s != CellCoordinate.EMPTY) {
                     if (isOpponentPiece(s, player)) { opps++; if (opps > 1) return false; }
@@ -512,11 +512,24 @@ public class BoardModel {
             }
             return opps == 1;
         } else {
-            // Standard 2-square diagonal jump.
-            if (absRow != 2 || absCol != 2) return false;
+            // Two-square jump.  At level 3 it can be in any of the 8 directions
+            // (Grade A: "all pieces ... horizontal and vertical as well as
+            // diagonal").  At levels 1/2 it must be diagonal.
+            boolean validShape;
+            if (level == 3) {
+                boolean diag2 = (absRow == 2 && absCol == 2);
+                boolean horz2 = (absRow == 0 && absCol == 2);
+                boolean vert2 = (absRow == 2 && absCol == 0);
+                validShape = diag2 || horz2 || vert2;
+            } else {
+                validShape = (absRow == 2 && absCol == 2);
+            }
+            if (!validShape) return false;
             // Level 1/2 regular pieces must capture in their forward direction unless king.
             if (level <= 2 && !isKing && !isForwardStep(r1, r2, status)) return false;
-            int mid = board[r1 + rowDiff / 2][c1 + colDiff / 2].getStatus();
+            int dr = (rowDiff == 0) ? 0 : rowDiff / 2;
+            int dc = (colDiff == 0) ? 0 : colDiff / 2;
+            int mid = board[r1 + dr][c1 + dc].getStatus();
             return isOpponentPiece(mid, player);
         }
     }
@@ -525,16 +538,23 @@ public class BoardModel {
     private boolean isCaptureMove(int r1, int c1, int r2, int c2) {
         int absRow = Math.abs(r2 - r1);
         int absCol = Math.abs(c2 - c1);
+        // Standard 2-square jump shapes (diag, and at level 3 also H / V).
         if (absRow == 2 && absCol == 2) return true;
+        if (level == 3) {
+            if (absRow == 0 && absCol == 2) return true;
+            if (absRow == 2 && absCol == 0) return true;
+        }
 
         int status = board[r1][c1].getStatus();
         boolean isKing = (status == CellCoordinate.RED_KING || status == CellCoordinate.BLACK_KING);
-        if (level == 3 && isKing && absRow == absCol && absRow > 2) {
-            // It's a flying-king move and we already validated; any distance > 2
-            // diagonal must have been a capture (otherwise validation would have
-            // required path to be empty AND would have come from isValidRegularMove).
-            // But to be safe re-check via isValidCapture which is idempotent.
-            return isValidCapture(r1, c1, r2, c2, currentPlayer);
+        if (level == 3 && isKing) {
+            // Flying-king long move: it's a capture iff it satisfies the
+            // capture rules (i.e. there's exactly one opponent in the path).
+            // Re-check via isValidCapture which is idempotent.
+            boolean longShape = (absRow == absCol && absRow > 2)
+                             || (absRow == 0 && absCol > 2)
+                             || (absCol == 0 && absRow > 2);
+            if (longShape) return isValidCapture(r1, c1, r2, c2, currentPlayer);
         }
         return false;
     }
@@ -549,8 +569,9 @@ public class BoardModel {
         boolean isKing = (status == CellCoordinate.RED_KING || status == CellCoordinate.BLACK_KING);
 
         if (level == 3 && isKing) {
-            // Flying-king: scan all 4 diagonals for a single opponent to jump over.
-            int[][] dirs = {{1,1},{1,-1},{-1,1},{-1,-1}};
+            // Grade-A flying-king: scan all 8 directions (4 diagonals, 4 orthogonals)
+            // for a single opponent to jump over.
+            int[][] dirs = {{1,1},{1,-1},{-1,1},{-1,-1},{1,0},{-1,0},{0,1},{0,-1}};
             for (int[] d : dirs) {
                 boolean foundOpp = false;
                 for (int step = 1; step < size; step++) {
@@ -569,9 +590,12 @@ public class BoardModel {
                 }
             }
         } else {
-            // Standard 2-square jump.  Direction restricted for level 1/2 men.
+            // Standard 2-square jump.  Direction restricted for level 1/2 men;
+            // at level 3 men can jump in any of 8 directions (Grade A).
             int[][] dirs;
-            if (isKing || level == 3) {
+            if (level == 3) {
+                dirs = new int[][]{{2,2},{2,-2},{-2,2},{-2,-2},{2,0},{-2,0},{0,2},{0,-2}};
+            } else if (isKing) {
                 dirs = new int[][]{{2,2},{2,-2},{-2,2},{-2,-2}};
             } else {
                 int fwd = (player == 1) ? -2 : 2;
@@ -644,16 +668,18 @@ public class BoardModel {
         int rowDiff = r2 - r1;
         int colDiff = c2 - c1;
         int absRow  = Math.abs(rowDiff);
-        int dr = rowDiff / absRow;
-        int dc = colDiff / Math.abs(colDiff);
+        int absCol  = Math.abs(colDiff);
+        int steps   = Math.max(absRow, absCol);
+        int dr = (rowDiff == 0) ? 0 : rowDiff / absRow;
+        int dc = (colDiff == 0) ? 0 : colDiff / absCol;
 
-        if (absRow == 2) {
+        if (steps == 2) {
             int mr = r1 + dr;
             int mc = c1 + dc;
             removeOnePieceAt(mr, mc);
         } else {
             // Flying king: first opponent piece encountered along the path.
-            for (int i = 1; i < absRow; i++) {
+            for (int i = 1; i < steps; i++) {
                 int mr = r1 + i * dr;
                 int mc = c1 + i * dc;
                 if (board[mr][mc].getStatus() != CellCoordinate.EMPTY) {
