@@ -223,9 +223,7 @@ public class Board extends JPanel {
         return false;
     }
 
-    /* ====================================================================
-     *                        AI / game-over flow
-     * ==================================================================== */
+    /* AI / game-over flow */
 
     private void checkGameOverOrAI() {
         int winner = model.checkWin();
