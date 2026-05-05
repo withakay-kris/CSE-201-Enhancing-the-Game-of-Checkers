@@ -76,10 +76,12 @@ public class BoardModel {
      * and direction / distance rules.
      */
     public boolean isValidMove(int r1, int c1, int r2, int c2) {
-        // Bounds + destination empty
+        // Bounds
         if (r1 < 0 || r1 >= size || c1 < 0 || c1 >= size) return false;
         if (r2 < 0 || r2 >= size || c2 < 0 || c2 >= size) return false;
-        if (!board[r2][c2].isEmpty())                       return false;
+        // Destination must be empty, OR it must be the level-1 stack-growth
+        // exception (a regular man landing on its own back-row stack).
+        if (!canLandOn(r1, c1, r2, c2))                   return false;
 
         // Must move own piece
         if (!isOwnedBy(r1, c1, currentPlayer)) return false;
@@ -133,6 +135,22 @@ public class BoardModel {
             // Stacks don't move in any current grade level; treat as no-op.
             // Defensive guard — should never reach here through isValidMove.
             return false;
+        }
+
+        // Level-1 stack growth: a regular man stepping (or jumping) onto its
+        // own back-row stack adds itself to the stack rather than landing as
+        // a fresh piece.  Handle this BEFORE overwriting the destination,
+        // since setStatus(srcStatus) would clobber the existing stack.
+        if (isLevel1StackGrowth(r1, c1, r2, c2)) {
+            board[r2][c2].incrementStack();
+            board[r1][c1].setStatus(CellCoordinate.EMPTY);
+            if (wasCapture) removeCapturedPiece(r1, c1, r2, c2);
+            // Every piece that joins a stack triggers another opponent removal,
+            // matching the existing per-promotion penalty rule.
+            pendingPenalty = true;
+            pendingJumpRow = -1;
+            pendingJumpCol = -1;
+            return false; // hold turn until removeOpponentPiece() resolves it
         }
 
         board[r2][c2].setStatus(srcStatus);
@@ -438,6 +456,34 @@ public class BoardModel {
         return s != CellCoordinate.EMPTY && !isOwnPiece(s, player);
     }
 
+    /**
+     * True if a piece at (r1,c1) is permitted to land on (r2,c2).
+     * Normally the destination must be empty.  The single exception is
+     * Grade-C stack growth: a regular man reaching its own promotion row
+     * may land on a same-color stack already there, adding itself to it.
+     */
+    private boolean canLandOn(int r1, int c1, int r2, int c2) {
+        if (board[r2][c2].isEmpty()) return true;
+        return isLevel1StackGrowth(r1, c1, r2, c2);
+    }
+
+    /**
+     * Detects the Grade-C stack-growth move: at level 1 only, a regular
+     * piece moving onto its own back-row stack to add itself to it.
+     */
+    private boolean isLevel1StackGrowth(int r1, int c1, int r2, int c2) {
+        if (level != 1) return false;
+        int src = board[r1][c1].getStatus();
+        int dst = board[r2][c2].getStatus();
+        if (src == CellCoordinate.RED_PIECE
+            && dst == CellCoordinate.RED_STACK
+            && r2 == 0)            return true;
+        if (src == CellCoordinate.BLACK_PIECE
+            && dst == CellCoordinate.BLACK_STACK
+            && r2 == size - 1)     return true;
+        return false;
+    }
+
     /* Regular-move validation */
     private boolean isValidRegularMove(int r1, int c1, int r2, int c2) {
         int   status   = board[r1][c1].getStatus();
@@ -480,7 +526,7 @@ public class BoardModel {
 
     /* Capture validation */
     private boolean isValidCapture(int r1, int c1, int r2, int c2, int player) {
-        if (!board[r2][c2].isEmpty()) return false;
+        if (!canLandOn(r1, c1, r2, c2)) return false;
 
         int   status = board[r1][c1].getStatus();
         boolean isKing = (status == CellCoordinate.RED_KING || status == CellCoordinate.BLACK_KING);
@@ -605,7 +651,7 @@ public class BoardModel {
                 int nr = r + d[0];
                 int nc = c + d[1];
                 if (nr < 0 || nr >= size || nc < 0 || nc >= size) continue;
-                if (!board[nr][nc].isEmpty()) continue;
+                if (!canLandOn(r, c, nr, nc)) continue;
                 int mr = r + d[0] / 2;
                 int mc = c + d[1] / 2;
                 if (isOpponentPiece(board[mr][mc].getStatus(), player))
@@ -655,7 +701,7 @@ public class BoardModel {
                 for (int dc : new int[]{-1, 1}) {
                     int nr = r + fwd; int nc = c + dc;
                     if (nr < 0 || nr >= size || nc < 0 || nc >= size) continue;
-                    if (board[nr][nc].isEmpty()) moves.add(new int[]{r, c, nr, nc});
+                    if (canLandOn(r, c, nr, nc)) moves.add(new int[]{r, c, nr, nc});
                 }
             }
         }
