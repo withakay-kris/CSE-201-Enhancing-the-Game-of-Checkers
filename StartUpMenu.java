@@ -1,18 +1,26 @@
-import javax.swing.*;
-import java.awt.*;
+import javax.swing.BorderFactory;
+import javax.swing.JButton;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.SwingUtilities;
+import javax.swing.UIManager;
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Dimension;
+import java.awt.FlowLayout;
+import java.awt.Font;
+import java.awt.GridLayout;
 
 /**
- *      Fix: the original code hard-coded level = 1 for every 8x8 game.
- *      Now it asks the player to choose Beginner (level 1) or
- *      Intermediate (level 2) after selecting an 8x8 board, so all
- *      three grade-level modes are reachable from the UI.
+ * StartUpMenu — entry point.
  *
- *      Board-size → level mapping:
- *        8×8  + Beginner     → level 1  (Grade C)
- *        8×8  + Intermediate → level 2  (Grade B)
- *       10×10               → level 3  (Grade A)
+ *  Board-size → level mapping:
+ *    8×8  + Beginner     → level 1  (Grade C, no AI, optional captures, stacks)
+ *    8×8  + Intermediate → level 2  (Grade B, AI 2-move, kings, mandatory captures)
+ *    10×10               → level 3  (Grade A, AI 4-move, flying kings, omni-directional men)
  */
-
 public class StartUpMenu {
 
     public static void main(String[] args) {
@@ -27,18 +35,16 @@ public class StartUpMenu {
     public void displayMenu() {
         JFrame frame = new JFrame("Checkers Setup");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(520, 360);
+        frame.setSize(560, 380);
         frame.setLayout(new BorderLayout(15, 15));
 
-        // Header
         JPanel header = new JPanel();
         header.setBackground(new Color(60, 63, 65));
-        JLabel title = new JLabel("Checkers — Project Scope Design");
+        JLabel title = new JLabel("Checkers — Choose Game Mode");
         title.setForeground(Color.WHITE);
         title.setFont(new Font("SansSerif", Font.BOLD, 22));
         header.add(title);
 
-        // Centre
         JPanel centre = new JPanel(new GridLayout(2, 1, 10, 10));
         centre.setBorder(BorderFactory.createEmptyBorder(10, 50, 10, 50));
 
@@ -53,26 +59,22 @@ public class StartUpMenu {
 
         btn8.setBackground(new Color(70, 130, 180));
         btn8.setForeground(Color.BLACK);
-        btn8.setPreferredSize(new Dimension(220, 42));
+        btn8.setPreferredSize(new Dimension(240, 42));
 
         btn10.setBackground(new Color(200, 70, 70));
         btn10.setForeground(Color.BLACK);
-        btn10.setPreferredSize(new Dimension(220, 42));
+        btn10.setPreferredSize(new Dimension(240, 42));
 
-        // 8×8: ask Beginner vs Intermediate before launching
         btn8.addActionListener(e -> {
             int level = chooseDifficulty8x8(frame);
             if (level > 0) launchGame(frame, 8, level);
         });
-
-        // 10×10 is always Advanced (Grade A)
         btn10.addActionListener(e -> launchGame(frame, 10, 3));
 
         btnRow.add(btn8);
         btnRow.add(btn10);
         centre.add(btnRow);
 
-        // Footer
         JLabel footer = new JLabel("Refactored MVC Implementation", JLabel.CENTER);
         footer.setFont(new Font("SansSerif", Font.ITALIC, 10));
 
@@ -83,17 +85,8 @@ public class StartUpMenu {
         frame.setVisible(true);
     }
 
-    /*Ask Beginner vs Intermediate for 8×8*/
-
-    /**
-     * Shows a dialog to choose difficulty for an 8×8 game.
-     * @return 1 for Beginner, 2 for Intermediate, -1 if cancelled.
-     */
     private int chooseDifficulty8x8(JFrame parent) {
-        String[] options = {
-            "Beginner",
-            "Intermediate"
-        };
+        String[] options = { "Beginner", "Intermediate" };
         int choice = JOptionPane.showOptionDialog(
                 parent,
                 "Choose difficulty for 8×8:",
@@ -103,19 +96,15 @@ public class StartUpMenu {
                 null,
                 options,
                 options[0]);
-
         if (choice == 0) return 1;
         if (choice == 1) return 2;
-        return -1; // cancelled
+        return -1;
     }
-
-    /*Launch selected game*/
 
     private void launchGame(JFrame menuFrame, int size, int level) {
         BoardModel model = new BoardModel(size, level);
 
-        // Ask for view mode
-        Object[] viewOpts = {"GUI (Swing) View", "Text-Based View"};
+        Object[] viewOpts = { "GUI (Swing) View", "Text-Based View" };
         int viewChoice = JOptionPane.showOptionDialog(
                 menuFrame,
                 "Select view mode:",
@@ -129,18 +118,19 @@ public class StartUpMenu {
         menuFrame.dispose();
 
         if (viewChoice == 1) {
-            // Text view — runs on its own thread so the Swing EDT is not blocked
+            // Text view runs on its own thread so the Swing EDT isn't blocked.
             final BoardModel m = model;
             new Thread(() -> {
                 CheckersText textGame = new CheckersText(m);
                 textGame.start();
-            }).start();
+                System.exit(0);
+            }, "checkers-text").start();
         } else {
-            // GUI view
             JFrame gameFrame = new JFrame("Checkers — " + size + "×" + size
                     + "  (Level " + level + ")");
             gameFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
             Board boardComponent = new Board(model);
+            gameFrame.setJMenuBar(boardComponent.getBoardMenuBar());
             gameFrame.add(boardComponent);
             gameFrame.pack();
             gameFrame.setLocationRelativeTo(null);

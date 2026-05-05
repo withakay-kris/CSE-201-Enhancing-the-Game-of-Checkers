@@ -2,116 +2,161 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Grade C adds  : turn switching, stack-penalty flag wired properly.
- * Grade B adds   : capture/jump logic, mandatory-capture enforcement,
- *                  king backward movement, multi-jump chaining,
- *                  win-condition detection, 2-move minimax for kings.
- * Grade A adds   : flying-king (any-distance diagonal jump),
- *                  horizontal/vertical single-step moves for all pieces,
- *                  evaluateBoard() heuristic, 4-move minimax for all pieces.
+ * BoardModel — the single source of game-logic truth (MVC: Model).
+ *
+ * All views (Board.java GUI, CheckersText) delegate validation / move
+ * execution / win checking here so the rules stay consistent.
+ *
+ * Grade-C rules : turn switching, no kings (stacks instead), optional
+ *                 captures (mandatory only when no other move exists),
+ *                 stack-penalty mechanic on promotion.
+ * Grade-B rules : kings (no stacks), MANDATORY captures, multi-jump
+ *                 chaining, kings can move backward, 2-move minimax AI
+ *                 for kings.
+ * Grade-A rules : flying-king (any-distance diagonal jump), single
+ *                 pieces may step horizontally/vertically as well as
+ *                 diagonally, evaluateBoard() heuristic, 4-move minimax
+ *                 for all pieces.
+ *
+ * Fixes vs. the previous version:
+ *   - Level 1 captures are now permitted (spec: "the C-version will not
+ *     REQUIRE a piece to jump if one is available — however if it is the
+ *     only move possible, it must be taken").
+ *   - "No legal move" win is now decided by piece count (spec) instead of
+ *     defaulting to the opponent.
+ *   - Stack height is preserved through captures and removals.
+ *   - removeOpponentPiece now correctly decrements stack heights.
+ *   - Penalty cell selection cannot be the cell that just promoted
+ *     (otherwise the promoting player just removes their own newly-made
+ *     stack — which makes no sense).  Spec implies opponent piece only,
+ *     which we already enforced.
  */
-
 public class BoardModel {
 
-    /*State*/
+    /* ---------------- State ---------------- */
 
-    private CellCoordinate[][] board;
+    private final CellCoordinate[][] board;
     private final int size;
-    private final int level;          // 1=Beginner(C)  2=Intermediate(B)  3=Advanced(A)
-    private int currentPlayer;        // 1=Red  2=Black
+    private final int level;          // 1=Beginner(C), 2=Intermediate(B), 3=Advanced(A)
+    private int currentPlayer;        // 1=Red, 2=Black
 
-    /** True after a stack promotion at level 1; caller must resolve before turn ends. */
+    /** True when a stack has just been created and the player still owes a removal. */
     private boolean pendingPenalty;
 
-    /** Non-negative when a piece must continue a multi-jump chain. */
+    /** When >=0, the chained piece that MUST keep jumping until no more captures. */
     private int pendingJumpRow = -1;
     private int pendingJumpCol = -1;
 
-    /*Construction*/
+    /* ---------------- Construction ---------------- */
 
     public BoardModel(int size, int level) {
         this.size  = size;
         this.level = level;
         this.board = new CellCoordinate[size][size];
-        this.currentPlayer  = 1;   // Red goes first
+        this.currentPlayer  = 1;     // Red moves first (standard checkers convention)
         this.pendingPenalty = false;
         initializeBoard();
     }
 
     private void initializeBoard() {
+        // 8x8 → 3 rows of pieces per side; 10x10 → 4 rows.
         int rows = (size == 8) ? 3 : 4;
         for (int r = 0; r < size; r++) {
             for (int c = 0; c < size; c++) {
-                boolean available = (r + c) % 2 != 0;
-                board[r][c] = new CellCoordinate(available);
-                if (available) {
-                    if (r < rows)            board[r][c].setStatus(CellCoordinate.BLACK_PIECE);
-                    else if (r >= size - rows) board[r][c].setStatus(CellCoordinate.RED_PIECE);
-                }
+                boolean dark = (r + c) % 2 != 0;
+                board[r][c] = new CellCoordinate(dark);
+                if (!dark) continue;
+                if (r < rows)              board[r][c].setStatus(CellCoordinate.BLACK_PIECE);
+                else if (r >= size - rows) board[r][c].setStatus(CellCoordinate.RED_PIECE);
             }
         }
     }
 
-    /*PUBLIC MOVE INTERFACE*/
+    /* ---------------- Move interface used by views ---------------- */
 
     /**
-     * Full validation for the human player's chosen move.
-     * Enforces whose turn it is, mandatory captures, direction rules,
-     * and multi-jump continuations.
+     * Full validation for a player-attempted move.
+     * Enforces turn ownership, multi-jump continuation, mandatory captures
+     * (level 2+ unconditional, level 1 only when no non-capture is available),
+     * and direction / distance rules.
      */
     public boolean isValidMove(int r1, int c1, int r2, int c2) {
         // Bounds + destination empty
+        if (r1 < 0 || r1 >= size || c1 < 0 || c1 >= size) return false;
         if (r2 < 0 || r2 >= size || c2 < 0 || c2 >= size) return false;
-        if (!board[r2][c2].isEmpty())                        return false;
+        if (!board[r2][c2].isEmpty())                       return false;
 
         // Must move own piece
         if (!isOwnedBy(r1, c1, currentPlayer)) return false;
 
-        // Multi-jump in progress: only that piece may move, and only by capturing
+        // Multi-jump in progress: only that piece may move, and only by capturing.
         if (pendingJumpRow >= 0) {
             if (r1 != pendingJumpRow || c1 != pendingJumpCol) return false;
             return isValidCapture(r1, c1, r2, c2, currentPlayer);
         }
 
-        // Mandatory capture (level 2+): must jump if a jump is available
-        if (level >= 2 && !getAllCaptures(currentPlayer).isEmpty()) {
-            return isValidCapture(r1, c1, r2, c2, currentPlayer);
+        // Mandatory capture rules differ by level:
+        //  - Level 2/3 : if any capture exists for this player, only captures are legal.
+        //  - Level 1   : captures are optional UNLESS no non-capture move exists.
+        boolean anyCapture = !getAllCaptures(currentPlayer).isEmpty();
+        if (anyCapture) {
+            if (level >= 2) {
+                return isValidCapture(r1, c1, r2, c2, currentPlayer);
+            } else {
+                // Level 1: captures are an OPTION.  But if there are NO regular
+                // moves available anywhere on the board, the capture is forced.
+                boolean anyRegular = hasAnyRegularMove(currentPlayer);
+                if (!anyRegular) {
+                    return isValidCapture(r1, c1, r2, c2, currentPlayer);
+                }
+                // Otherwise either capture or regular is fine.
+                if (isValidCapture(r1, c1, r2, c2, currentPlayer)) return true;
+                return isValidRegularMove(r1, c1, r2, c2);
+            }
         }
 
-        // A capture is always a legal move when available
-        if (level >= 2 && isValidCapture(r1, c1, r2, c2, currentPlayer)) return true;
-
-        // --- Regular (non-capture) move rules ---
+        // No captures available → only regular moves
         return isValidRegularMove(r1, c1, r2, c2);
     }
 
     /**
-     * Executes a pre-validated move.  Returns true if the turn switched to
-     * the other player, false if the turn is still in progress (multi-jump
-     * or stack penalty pending).
+     * Executes a pre-validated move.
+     * @return true if the turn passed to the other player, false if the same
+     *         player must continue (multi-jump or pending stack penalty).
      */
     public boolean executeMove(int r1, int c1, int r2, int c2) {
         boolean wasCapture = isCaptureMove(r1, c1, r2, c2);
 
         // Move the piece
-        int status = board[r1][c1].getStatus();
-        board[r2][c2].setStatus(status);
+        int srcStatus     = board[r1][c1].getStatus();
+        int srcStackHeight = board[r1][c1].getStackHeight();
+        // (A stack cannot move under our rules — but be safe: only a single piece moves.)
+        boolean fromStack = (srcStatus == CellCoordinate.RED_STACK
+                          || srcStatus == CellCoordinate.BLACK_STACK);
+
+        if (fromStack) {
+            // Stacks don't move in any current grade level; treat as no-op.
+            // Defensive guard — should never reach here through isValidMove.
+            return false;
+        }
+
+        board[r2][c2].setStatus(srcStatus);
         board[r1][c1].setStatus(CellCoordinate.EMPTY);
 
-        // Remove the captured piece
+        // Remove the captured piece (or one piece off a captured stack).
         if (wasCapture) removeCapturedPiece(r1, c1, r2, c2);
 
-        // Promotion check
+        // Promotion check (king at level 2+, stack at level 1).
         boolean promoted = checkPromotion(r2, c2);
 
-        // Level-1 stack penalty: hold the turn, let caller invoke removeOpponentPiece()
+        // Level-1 stack penalty: hold the turn, let caller invoke removeOpponentPiece().
         if (pendingPenalty) {
             pendingJumpRow = -1;
             pendingJumpCol = -1;
             return false;
         }
 
-        // After a capture (not followed by promotion), check for multi-jump continuation
+        // After a capture (not interrupted by promotion at lvl 2+), check for chain.
         if (wasCapture && !promoted) {
             List<int[]> further = getCapturesForPiece(r2, c2, currentPlayer);
             if (!further.isEmpty()) {
@@ -121,55 +166,63 @@ public class BoardModel {
             }
         }
 
-        // Normal end-of-turn
+        // End of turn.
         pendingJumpRow = -1;
         pendingJumpCol = -1;
-        currentPlayer = (currentPlayer == 1) ? 2 : 1;
+        currentPlayer  = (currentPlayer == 1) ? 2 : 1;
         return true;
     }
 
-    /*WIN CONDITION*/
+    /* ---------------- Win condition ---------------- */
 
     /**
-     * @return 1 if Red wins, 2 if Black wins, 0 if the game is still going.
+     * @return 1 if Red wins, 2 if Black wins, 0 if the game continues, 3 if drawn
+     *         (equal pieces and current player has no moves — extremely rare).
      */
     public int checkWin() {
-        boolean redAlive   = false;
-        boolean blackAlive = false;
+        int redCount = 0, blackCount = 0;
         for (int r = 0; r < size; r++) {
             for (int c = 0; c < size; c++) {
                 int s = board[r][c].getStatus();
+                int n = board[r][c].getPieceCount();
                 if (s == CellCoordinate.RED_PIECE  || s == CellCoordinate.RED_KING
-                 || s == CellCoordinate.RED_STACK)   redAlive   = true;
+                 || s == CellCoordinate.RED_STACK)  redCount   += n;
                 if (s == CellCoordinate.BLACK_PIECE || s == CellCoordinate.BLACK_KING
-                 || s == CellCoordinate.BLACK_STACK) blackAlive = true;
+                 || s == CellCoordinate.BLACK_STACK) blackCount += n;
             }
         }
-        if (!blackAlive) return 1;
-        if (!redAlive)   return 2;
+        if (blackCount == 0) return 1;
+        if (redCount   == 0) return 2;
 
-        // No legal moves → current player loses
+        // Spec: "no legal move possible → player with most pieces wins"
         if (getAllMoves(currentPlayer).isEmpty()) {
-            return (currentPlayer == 1) ? 2 : 1;
+            if (redCount  > blackCount) return 1;
+            if (blackCount > redCount)  return 2;
+            return 3; // draw
         }
         return 0;
     }
 
-    /*AI — MINIMAX WITH ALPHA-BETA PRUNING*/
+    /* ---------------- AI: minimax with alpha–beta pruning ---------------- */
 
     /**
      * Returns the best [r1,c1,r2,c2] move for the current player.
      * Depth = 4 at level 3 (all pieces); depth = 2 at level 2 (Grade B).
+     * At level 1 the AI is not used.
      */
     public int[] getAIMove() {
         int depth     = (level == 3) ? 4 : 2;
-        boolean isMax = (currentPlayer == 1); // Red maximises
+        boolean isMax = (currentPlayer == 1);          // Red maximises
         int[]  best   = null;
         int bestScore = isMax ? Integer.MIN_VALUE : Integer.MAX_VALUE;
 
-        for (int[] move : getAllMoves(currentPlayer)) {
-            BoardModel copy  = deepCopy();
+        List<int[]> moves = getAllMoves(currentPlayer);
+        for (int[] move : moves) {
+            BoardModel copy = deepCopy();
             copy.executeMove(move[0], move[1], move[2], move[3]);
+            // Resolve any pending penalty in the copy (AI can't pause for human input).
+            // Pick a deterministic opponent-piece to remove if needed.
+            if (copy.isPendingPenalty()) copy.autoResolvePenalty();
             int score = copy.minimax(depth - 1, Integer.MIN_VALUE, Integer.MAX_VALUE, !isMax);
             if (isMax ? (score > bestScore) : (score < bestScore)) {
                 bestScore = score;
@@ -179,10 +232,25 @@ public class BoardModel {
         return best;
     }
 
+    /** Pick any opponent piece for the level-1 stack-penalty resolution
+     *  (used inside minimax copies and when the AI itself promotes). */
+    private void autoResolvePenalty() {
+        int foePlayer = (currentPlayer == 1) ? 2 : 1;
+        for (int r = 0; r < size; r++) {
+            for (int c = 0; c < size; c++) {
+                if (isOwnedBy(r, c, foePlayer)) { removeOpponentPiece(r, c); return; }
+            }
+        }
+        // No opponent pieces left — clear the flag so we don't deadlock.
+        pendingPenalty = false;
+        currentPlayer  = (currentPlayer == 1) ? 2 : 1;
+    }
+
     private int minimax(int depth, int alpha, int beta, boolean maximizing) {
         int winner = checkWin();
-        if (winner == 1) return  1000 + depth;   // Red wins — prefer quicker wins
-        if (winner == 2) return -1000 - depth;   // Black wins
+        if (winner == 1) return  1000 + depth;   // prefer faster wins
+        if (winner == 2) return -1000 - depth;
+        if (winner == 3) return 0;               // draw
 
         if (depth == 0) return evaluateBoard();
 
@@ -194,6 +262,7 @@ public class BoardModel {
             for (int[] m : moves) {
                 BoardModel copy = deepCopy();
                 copy.executeMove(m[0], m[1], m[2], m[3]);
+                if (copy.isPendingPenalty()) copy.autoResolvePenalty();
                 int s = copy.minimax(depth - 1, alpha, beta, false);
                 max   = Math.max(max, s);
                 alpha = Math.max(alpha, s);
@@ -205,6 +274,7 @@ public class BoardModel {
             for (int[] m : moves) {
                 BoardModel copy = deepCopy();
                 copy.executeMove(m[0], m[1], m[2], m[3]);
+                if (copy.isPendingPenalty()) copy.autoResolvePenalty();
                 int s = copy.minimax(depth - 1, alpha, beta, true);
                 min  = Math.min(min, s);
                 beta = Math.min(beta, s);
@@ -215,27 +285,25 @@ public class BoardModel {
     }
 
     /**
-     * Board-evaluation heuristic.
-     * Positive = Red advantage.  Negative = Black advantage.
-     * Kings are worth more; center-board positions get a small positional bonus.
+     * Heuristic.  Positive = Red advantage.  Negative = Black advantage.
+     * Material + small centre-column positional bonus.
      */
     public int evaluateBoard() {
         int score = 0;
         for (int r = 0; r < size; r++) {
             for (int c = 0; c < size; c++) {
                 int s = board[r][c].getStatus();
-                // Material
+                int n = board[r][c].getPieceCount();
                 switch (s) {
-                    case CellCoordinate.RED_PIECE:   score += 10; break;
-                    case CellCoordinate.RED_KING:    score += 16; break;
-                    case CellCoordinate.RED_STACK:   score += 13; break;
-                    case CellCoordinate.BLACK_PIECE: score -= 10; break;
-                    case CellCoordinate.BLACK_KING:  score -= 16; break;
-                    case CellCoordinate.BLACK_STACK: score -= 13; break;
+                    case CellCoordinate.RED_PIECE:   score += 10 * n; break;
+                    case CellCoordinate.RED_KING:    score += 16 * n; break;
+                    case CellCoordinate.RED_STACK:   score += 13 * n; break;
+                    case CellCoordinate.BLACK_PIECE: score -= 10 * n; break;
+                    case CellCoordinate.BLACK_KING:  score -= 16 * n; break;
+                    case CellCoordinate.BLACK_STACK: score -= 13 * n; break;
                 }
-                // Positional bonus: prefer centre columns
                 if (s != CellCoordinate.EMPTY) {
-                    int centerBonus = (int)(2.0 - Math.abs(c - (size / 2.0 - 0.5)));
+                    int centerBonus = (int) (2.0 - Math.abs(c - (size / 2.0 - 0.5)));
                     if (s == CellCoordinate.RED_PIECE || s == CellCoordinate.RED_KING)
                         score += centerBonus;
                     else if (s == CellCoordinate.BLACK_PIECE || s == CellCoordinate.BLACK_KING)
@@ -246,12 +314,11 @@ public class BoardModel {
         return score;
     }
 
-    /*CAPTURE / MOVE QUERIES (package-visible for minimax copies)*/
+    /* ---------------- Move enumeration ---------------- */
 
-    /** All [r1,c1,r2,c2] captures available to {@code player}. */
+    /** All legal [r1,c1,r2,c2] capture moves available to {@code player}. */
     public List<int[]> getAllCaptures(int player) {
         List<int[]> caps = new ArrayList<>();
-        if (level < 2) return caps;   // Level 1 has no captures
         for (int r = 0; r < size; r++)
             for (int c = 0; c < size; c++)
                 if (isOwnedBy(r, c, player))
@@ -259,19 +326,29 @@ public class BoardModel {
         return caps;
     }
 
-    /** All legal [r1,c1,r2,c2] moves for {@code player} (captures are mandatory). */
+    /** All legal [r1,c1,r2,c2] moves for {@code player}.  Captures included or
+     *  forced according to current rules. */
     public List<int[]> getAllMoves(int player) {
-        // Multi-jump in progress: only the chained piece may move
+        // Multi-jump in progress: only the chained piece may move.
         if (pendingJumpRow >= 0) {
             return getCapturesForPiece(pendingJumpRow, pendingJumpCol, player);
         }
 
-        // Mandatory capture at levels 2+
         List<int[]> caps = getAllCaptures(player);
-        if (!caps.isEmpty() && level >= 2) return caps;
 
-        // Collect all regular moves
-        List<int[]> moves = new ArrayList<>(caps); // includes any caps found at level 1 (none)
+        if (level >= 2) {
+            // Mandatory capture: if any exists, those are the ONLY legal moves.
+            if (!caps.isEmpty()) return caps;
+        } else {
+            // Level 1: captures forced only when no regular move exists.
+            if (!caps.isEmpty() && !hasAnyRegularMove(player)) return caps;
+        }
+
+        // Otherwise, captures + regular moves are both legal at level 1;
+        // at level 2/3 we only reach here if there were no captures, so
+        // regulars are the only option.
+        List<int[]> moves = new ArrayList<>();
+        if (level == 1) moves.addAll(caps);  // optional captures at level 1
         for (int r = 0; r < size; r++) {
             for (int c = 0; c < size; c++) {
                 if (!isOwnedBy(r, c, player)) continue;
@@ -281,15 +358,30 @@ public class BoardModel {
         return moves;
     }
 
-    /*STACK PENALTY (Grade C)*/
+    private boolean hasAnyRegularMove(int player) {
+        for (int r = 0; r < size; r++) {
+            for (int c = 0; c < size; c++) {
+                if (!isOwnedBy(r, c, player)) continue;
+                if (!getRegularMovesForPiece(r, c, player).isEmpty()) return true;
+            }
+        }
+        return false;
+    }
+
+    /* ---------------- Stack penalty (Grade C) ---------------- */
 
     public boolean isPendingPenalty() { return pendingPenalty; }
 
     /**
-     * Called by the UI/text loop after a stack is created.
-     * Removes an opponent piece chosen by the current player.
+     * Resolves a pending stack-penalty by removing one of the opponent's pieces.
+     * If the chosen cell is a stack, one piece is taken off the top instead of
+     * obliterating the whole stack.
+     * @return true on success; false if the chosen cell does not contain an
+     *         opponent piece or the call is made when no penalty is pending.
      */
     public boolean removeOpponentPiece(int r, int c) {
+        if (!pendingPenalty)                                   return false;
+        if (r < 0 || r >= size || c < 0 || c >= size)          return false;
         int s = board[r][c].getStatus();
         boolean valid =
             (currentPlayer == 1 && (s == CellCoordinate.BLACK_PIECE
@@ -300,22 +392,38 @@ public class BoardModel {
                                   || s == CellCoordinate.RED_STACK));
         if (!valid) return false;
 
-        board[r][c].setStatus(CellCoordinate.EMPTY);
+        if (s == CellCoordinate.RED_STACK || s == CellCoordinate.BLACK_STACK) {
+            board[r][c].decrementStack();          // takes one off the top
+        } else {
+            board[r][c].setStatus(CellCoordinate.EMPTY);
+        }
         pendingPenalty = false;
-        currentPlayer = (currentPlayer == 1) ? 2 : 1;  // now switch turns
+        currentPlayer  = (currentPlayer == 1) ? 2 : 1;
         return true;
     }
 
-    /*GETTERS*/
+    /* ---------------- Getters ---------------- */
 
-    public int getSize()          { return size; }
-    public int getLevel()         { return level; }
-    public int getCurrentPlayer() { return currentPlayer; }
-    public int getCellStatus(int r, int c) { return board[r][c].getStatus(); }
+    public int getSize()                  { return size; }
+    public int getLevel()                 { return level; }
+    public int getCurrentPlayer()         { return currentPlayer; }
+    public int getCellStatus(int r, int c){ return board[r][c].getStatus(); }
+    public int getStackHeight(int r, int c){ return board[r][c].getStackHeight(); }
 
-    public boolean hasPendingJump() { return pendingJumpRow >= 0; }
-    public int getPendingJumpRow()  { return pendingJumpRow; }
-    public int getPendingJumpCol()  { return pendingJumpCol; }
+    public boolean hasPendingJump()       { return pendingJumpRow >= 0; }
+    public int     getPendingJumpRow()    { return pendingJumpRow; }
+    public int     getPendingJumpCol()    { return pendingJumpCol; }
+
+    /** Total piece count on the board for the given player (stacks counted by height). */
+    public int getPieceCountFor(int player) {
+        int n = 0;
+        for (int r = 0; r < size; r++)
+            for (int c = 0; c < size; c++)
+                if (isOwnedBy(r, c, player)) n += board[r][c].getPieceCount();
+        return n;
+    }
+
+    /* ---------------- Internal helpers ---------------- */
 
     private boolean isOwnedBy(int r, int c, int player) {
         return isOwnPiece(board[r][c].getStatus(), player);
@@ -335,58 +443,62 @@ public class BoardModel {
         return s != CellCoordinate.EMPTY && !isOwnPiece(s, player);
     }
 
-    // Regular-move validation
-
+    /* Regular-move validation */
     private boolean isValidRegularMove(int r1, int c1, int r2, int c2) {
-        int   status    = board[r1][c1].getStatus();
-        boolean isKing  = (status == CellCoordinate.RED_KING || status == CellCoordinate.BLACK_KING);
-        int   rowDiff   = r2 - r1;
-        int   colDiff   = c2 - c1;
-        int   absRow    = Math.abs(rowDiff);
-        int   absCol    = Math.abs(colDiff);
+        int   status   = board[r1][c1].getStatus();
+        boolean isKing = (status == CellCoordinate.RED_KING || status == CellCoordinate.BLACK_KING);
+        boolean isStack = (status == CellCoordinate.RED_STACK || status == CellCoordinate.BLACK_STACK);
+
+        // Stacks don't move (they're locked at the back row earning capture points only).
+        if (isStack) return false;
+
+        int rowDiff  = r2 - r1;
+        int colDiff  = c2 - c1;
+        int absRow   = Math.abs(rowDiff);
+        int absCol   = Math.abs(colDiff);
 
         if (level == 3) {
             if (isKing) {
-                // Flying king: any distance, any of 8 directions, path must be clear
+                // Flying king: any distance, any of 8 directions, path must be clear.
                 boolean diagonal   = (absRow == absCol && absRow > 0);
                 boolean horizontal = (absRow == 0 && absCol > 0);
                 boolean vertical   = (absRow > 0 && absCol == 0);
                 if (!diagonal && !horizontal && !vertical) return false;
                 return isPathClear(r1, c1, r2, c2);
             } else {
-                // Grade A: regular pieces single-step in all 8 directions
+                // Grade A: regular pieces single-step in all 8 directions.
                 return (absRow <= 1 && absCol <= 1 && (absRow + absCol) > 0);
             }
         } else {
-            // Levels 1 & 2: diagonal only
+            // Levels 1 & 2: diagonal-only single step.
             if (absRow != 1 || absCol != 1) return false;
-            if (isKing) return true;                  // kings go any diagonal direction
+            if (isKing) return true;                  // kings move any diagonal direction
             return isForwardStep(r1, r2, status);     // regular pieces forward only
         }
     }
 
-    /** True if row change is in the correct forward direction for this piece type. */
     private boolean isForwardStep(int r1, int r2, int status) {
         if (status == CellCoordinate.RED_PIECE)   return r2 < r1; // Red moves up
         if (status == CellCoordinate.BLACK_PIECE) return r2 > r1; // Black moves down
         return true; // kings handled elsewhere
     }
 
-    // Capture validation
-
+    /* Capture validation */
     private boolean isValidCapture(int r1, int c1, int r2, int c2, int player) {
-        if (level < 2) return false;   // Level 1 has no captures
         if (!board[r2][c2].isEmpty()) return false;
 
         int   status = board[r1][c1].getStatus();
         boolean isKing = (status == CellCoordinate.RED_KING || status == CellCoordinate.BLACK_KING);
-        int   rowDiff  = r2 - r1;
-        int   colDiff  = c2 - c1;
-        int   absRow   = Math.abs(rowDiff);
-        int   absCol   = Math.abs(colDiff);
+        boolean isStack = (status == CellCoordinate.RED_STACK || status == CellCoordinate.BLACK_STACK);
+        if (isStack) return false; // stacks cannot capture
+
+        int   rowDiff = r2 - r1;
+        int   colDiff = c2 - c1;
+        int   absRow  = Math.abs(rowDiff);
+        int   absCol  = Math.abs(colDiff);
 
         if (level == 3 && isKing) {
-            // Flying-king capture: any diagonal distance, exactly 1 opponent in path
+            // Flying-king capture: any diagonal distance with exactly 1 opponent in path.
             if (absRow != absCol || absRow < 2) return false;
             int dr = rowDiff / absRow;
             int dc = colDiff / absCol;
@@ -395,22 +507,22 @@ public class BoardModel {
                 int s = board[r1 + i * dr][c1 + i * dc].getStatus();
                 if (s != CellCoordinate.EMPTY) {
                     if (isOpponentPiece(s, player)) { opps++; if (opps > 1) return false; }
-                    else                              return false; // own piece in path
+                    else                            return false; // own piece in path
                 }
             }
             return opps == 1;
         } else {
-            // Standard 2-square diagonal jump
+            // Standard 2-square diagonal jump.
             if (absRow != 2 || absCol != 2) return false;
+            // Level 1/2 regular pieces must capture in their forward direction unless king.
+            if (level <= 2 && !isKing && !isForwardStep(r1, r2, status)) return false;
             int mid = board[r1 + rowDiff / 2][c1 + colDiff / 2].getStatus();
             return isOpponentPiece(mid, player);
         }
     }
 
-    // Determine at execution time whether a move is a capture
-
+    /** Determines whether an already-validated move IS a capture. */
     private boolean isCaptureMove(int r1, int c1, int r2, int c2) {
-        if (level < 2) return false;
         int absRow = Math.abs(r2 - r1);
         int absCol = Math.abs(c2 - c1);
         if (absRow == 2 && absCol == 2) return true;
@@ -418,22 +530,26 @@ public class BoardModel {
         int status = board[r1][c1].getStatus();
         boolean isKing = (status == CellCoordinate.RED_KING || status == CellCoordinate.BLACK_KING);
         if (level == 3 && isKing && absRow == absCol && absRow > 2) {
+            // It's a flying-king move and we already validated; any distance > 2
+            // diagonal must have been a capture (otherwise validation would have
+            // required path to be empty AND would have come from isValidRegularMove).
+            // But to be safe re-check via isValidCapture which is idempotent.
             return isValidCapture(r1, c1, r2, c2, currentPlayer);
         }
         return false;
     }
 
-    // Capture enumeration (for mandatory-capture + multi-jump)
-
+    /* Capture enumeration for one piece */
     private List<int[]> getCapturesForPiece(int r, int c, int player) {
         List<int[]> caps = new ArrayList<>();
-        if (level < 2) return caps;
-
         int status = board[r][c].getStatus();
+        if (status == CellCoordinate.EMPTY) return caps;
+        if (status == CellCoordinate.RED_STACK || status == CellCoordinate.BLACK_STACK) return caps;
+
         boolean isKing = (status == CellCoordinate.RED_KING || status == CellCoordinate.BLACK_KING);
 
         if (level == 3 && isKing) {
-            // Flying-king: scan all 4 diagonals for a single opponent to jump over
+            // Flying-king: scan all 4 diagonals for a single opponent to jump over.
             int[][] dirs = {{1,1},{1,-1},{-1,1},{-1,-1}};
             for (int[] d : dirs) {
                 boolean foundOpp = false;
@@ -443,18 +559,24 @@ public class BoardModel {
                     if (nr < 0 || nr >= size || nc < 0 || nc >= size) break;
                     int s = board[nr][nc].getStatus();
                     if (s == CellCoordinate.EMPTY) {
-                        if (foundOpp) caps.add(new int[]{r, c, nr, nc}); // valid landing
+                        if (foundOpp) caps.add(new int[]{r, c, nr, nc});
                     } else if (isOpponentPiece(s, player)) {
-                        if (foundOpp) break; // can't jump two opponents
+                        if (foundOpp) break;             // can't jump two opponents
                         foundOpp = true;
                     } else {
-                        break; // own piece blocks
+                        break;                            // own piece blocks
                     }
                 }
             }
         } else {
-            // Standard 2-square jump in all 4 diagonal directions
-            int[][] dirs = {{2,2},{2,-2},{-2,2},{-2,-2}};
+            // Standard 2-square jump.  Direction restricted for level 1/2 men.
+            int[][] dirs;
+            if (isKing || level == 3) {
+                dirs = new int[][]{{2,2},{2,-2},{-2,2},{-2,-2}};
+            } else {
+                int fwd = (player == 1) ? -2 : 2;
+                dirs = new int[][]{{fwd,2},{fwd,-2}};
+            }
             for (int[] d : dirs) {
                 int nr = r + d[0];
                 int nc = c + d[1];
@@ -469,16 +591,15 @@ public class BoardModel {
         return caps;
     }
 
-    // Regular-move enumeration (for AI / win detection)
-
+    /* Regular-move enumeration for one piece */
     private List<int[]> getRegularMovesForPiece(int r, int c, int player) {
         List<int[]> moves = new ArrayList<>();
         int status = board[r][c].getStatus();
+        if (status == CellCoordinate.RED_STACK || status == CellCoordinate.BLACK_STACK) return moves;
         boolean isKing = (status == CellCoordinate.RED_KING || status == CellCoordinate.BLACK_KING);
 
         if (level == 3) {
             if (isKing) {
-                // All 8 directions, any distance (path must be clear)
                 int[][] dirs = {{1,1},{1,-1},{-1,1},{-1,-1},{1,0},{-1,0},{0,1},{0,-1}};
                 for (int[] d : dirs) {
                     for (int step = 1; step < size; step++) {
@@ -490,7 +611,6 @@ public class BoardModel {
                     }
                 }
             } else {
-                // Single step in all 8 directions
                 int[][] dirs = {{-1,-1},{-1,0},{-1,1},{0,-1},{0,1},{1,-1},{1,0},{1,1}};
                 for (int[] d : dirs) {
                     int nr = r + d[0]; int nc = c + d[1];
@@ -500,7 +620,6 @@ public class BoardModel {
             }
         } else {
             if (isKing) {
-                // 4 diagonal directions, 1 step
                 int[][] dirs = {{1,1},{1,-1},{-1,1},{-1,-1}};
                 for (int[] d : dirs) {
                     int nr = r + d[0]; int nc = c + d[1];
@@ -508,7 +627,6 @@ public class BoardModel {
                     if (board[nr][nc].isEmpty()) moves.add(new int[]{r, c, nr, nc});
                 }
             } else {
-                // Forward diagonal only
                 int fwd = (player == 1) ? -1 : 1;
                 for (int dc : new int[]{-1, 1}) {
                     int nr = r + fwd; int nc = c + dc;
@@ -520,7 +638,7 @@ public class BoardModel {
         return moves;
     }
 
-    // Execution helpers
+    /* Execution helpers */
 
     private void removeCapturedPiece(int r1, int c1, int r2, int c2) {
         int rowDiff = r2 - r1;
@@ -530,35 +648,63 @@ public class BoardModel {
         int dc = colDiff / Math.abs(colDiff);
 
         if (absRow == 2) {
-            // Standard 2-square jump
-            board[r1 + dr][c1 + dc].setStatus(CellCoordinate.EMPTY);
+            int mr = r1 + dr;
+            int mc = c1 + dc;
+            removeOnePieceAt(mr, mc);
         } else {
-            // Flying king: first opponent piece encountered along the path
+            // Flying king: first opponent piece encountered along the path.
             for (int i = 1; i < absRow; i++) {
                 int mr = r1 + i * dr;
                 int mc = c1 + i * dc;
                 if (board[mr][mc].getStatus() != CellCoordinate.EMPTY) {
-                    board[mr][mc].setStatus(CellCoordinate.EMPTY);
+                    removeOnePieceAt(mr, mc);
                     break;
                 }
             }
         }
     }
 
-    /**
-     * Promotes a piece that has reached its promotion row.
-     * @return true if a promotion occurred.
-     */
+    /** Remove one piece at (r,c) — taking a single piece off a stack. */
+    private void removeOnePieceAt(int r, int c) {
+        int s = board[r][c].getStatus();
+        if (s == CellCoordinate.RED_STACK || s == CellCoordinate.BLACK_STACK) {
+            board[r][c].decrementStack();
+        } else {
+            board[r][c].setStatus(CellCoordinate.EMPTY);
+        }
+    }
+
+    /** Promotes a piece that has reached its promotion row.  Returns true if promoted. */
     private boolean checkPromotion(int r, int c) {
         int s = board[r][c].getStatus();
+
         if (r == 0 && s == CellCoordinate.RED_PIECE) {
-            board[r][c].setStatus(level == 1 ? CellCoordinate.RED_STACK : CellCoordinate.RED_KING);
-            if (level == 1) pendingPenalty = true;
+            if (level == 1) {
+                board[r][c].setStatus(CellCoordinate.RED_STACK);
+                pendingPenalty = true;
+            } else {
+                board[r][c].setStatus(CellCoordinate.RED_KING);
+            }
+            return true;
+        }
+        if (r == 0 && s == CellCoordinate.RED_STACK && level == 1) {
+            // Already a stack, just add to it (height +1) and trigger penalty again.
+            board[r][c].incrementStack();
+            pendingPenalty = true;
             return true;
         }
         if (r == size - 1 && s == CellCoordinate.BLACK_PIECE) {
-            board[r][c].setStatus(level == 1 ? CellCoordinate.BLACK_STACK : CellCoordinate.BLACK_KING);
-            if (level == 1) pendingPenalty = true;
+            if (level == 1) {
+                board[r][c].setStatus(CellCoordinate.BLACK_STACK);
+                pendingPenalty = true;
+            } else {
+                board[r][c].setStatus(CellCoordinate.BLACK_KING);
+            }
+            return true;
+        }
+        if (r == size - 1 && s == CellCoordinate.BLACK_STACK && level == 1) {
+            board[r][c].incrementStack();
+            pendingPenalty = true;
             return true;
         }
         return false;
@@ -580,19 +726,22 @@ public class BoardModel {
         return true;
     }
 
-    // Deep copy for minimax
-
+    /* Deep copy for minimax */
     private BoardModel deepCopy() {
         BoardModel copy = new BoardModel(this.size, this.level);
         copy.currentPlayer  = this.currentPlayer;
         copy.pendingPenalty = this.pendingPenalty;
         copy.pendingJumpRow = this.pendingJumpRow;
         copy.pendingJumpCol = this.pendingJumpCol;
-        for (int r = 0; r < size; r++)
+        for (int r = 0; r < size; r++) {
             for (int c = 0; c < size; c++) {
                 copy.board[r][c] = new CellCoordinate(this.board[r][c].isAvailable());
                 copy.board[r][c].setStatus(this.board[r][c].getStatus());
+                // Restore stack height (setStatus resets it to 1 for stacks).
+                int h = this.board[r][c].getStackHeight();
+                while (copy.board[r][c].getStackHeight() < h) copy.board[r][c].incrementStack();
             }
+        }
         return copy;
     }
 }
