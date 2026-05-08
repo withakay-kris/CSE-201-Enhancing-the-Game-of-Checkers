@@ -23,15 +23,7 @@ import javax.swing.Timer;
  *
  * In the original code every game-logic decision was duplicated here in
  * tangled "is the king at the corner" branches that were inconsistent
- * with BoardModel.  Among the bugs that produced were:
- *
- *   - "(7,0) → (6,3) is legal" because of a stray '||' instead of '&&'
- *   - Red placed at the top in the GUI but at the bottom in BoardModel
- *   - Black moved first in the GUI but Red moved first in the model
- *   - Mandatory captures (level 2/3) never enforced in GUI
- *   - Flying-king + horizontal/vertical moves (level 3) never enforced
- *   - AI never invoked
- *   - Stack penalty (level 1) never handled
+ * with BoardModel.
  *
  * This rewrite makes Board a thin view/controller: every rules question
  * is answered by BoardModel.isValidMove / executeMove / getAllMoves /
@@ -40,24 +32,24 @@ import javax.swing.Timer;
  */
 public class Board extends JPanel {
 
-    /* ----- Components ----- */
+    /* Components */
     private final BoardModel model;
     private final Tiles[][]  theBoard;
     private final int        ROW;
     private final int        COL;
     private final JLabel     statusLabel;
 
-    /* ----- Selection state (view-only, not part of game rules) ----- */
+    /* Selection state (view-only, not part of game rules) */
     private int selectedRow = -1;
     private int selectedCol = -1;
     private List<int[]> legalDestinations = new ArrayList<>();
 
-    /* ----- AI scheduling ----- */
+    /* AI scheduling */
     /** When true, the human is Red and AI plays Black at level 2/3.
      *  Level 1 has no AI requirement, so it stays human-vs-human. */
     private final boolean aiEnabled;
 
-    /* ----- Menu ----- */
+    /* Menu */
     private JMenuBar menuBar;
 
     public Board(BoardModel model) {
@@ -99,9 +91,7 @@ public class Board extends JPanel {
 
     public JMenuBar getBoardMenuBar() { return menuBar; }
 
-    /* ====================================================================
-     *                        Click handling
-     * ==================================================================== */
+    /* Click handling */
 
     /**
      * Two-click move protocol:
@@ -294,9 +284,7 @@ public class Board extends JPanel {
         if (w != null) w.dispose();
     }
 
-    /* ====================================================================
-     *                    UI status / repaint helpers
-     * ==================================================================== */
+    /* UI status / repaint helpers */
 
     private void refreshStatus() {
         StringBuilder sb = new StringBuilder();
@@ -342,9 +330,7 @@ public class Board extends JPanel {
                 theBoard[r][c].repaint();
     }
 
-    /* ====================================================================
-     *                              Menu
-     * ==================================================================== */
+    /* Menu */
 
     private void createMenu() {
         menuBar = new JMenuBar();
